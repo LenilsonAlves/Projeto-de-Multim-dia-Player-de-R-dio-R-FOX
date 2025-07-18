@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="UTF-8">
+  <title>Projeto Multimídia</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #1e1e1e;
+      color: #ffffff;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 10px;
+    }
+
+    h1 { margin-bottom: 10px; }
+    audio { display: none; }
+
+    button, input[type="range"] {
+      margin: 5px;
+      padding: 10px 15px;
+      font-size: 16px;
+      border: none;
+      border-radius: 5px;
+      background-color: #1f5e85;
+      color: #fefefe;
+      cursor: pointer;
+    }
+
+    button:hover { background-color: #1ac241; }
+    button:disabled { background-color: #1f5e85; cursor: not-allowed; }
+
+    canvas {
+      background: black;
+      margin-top: 20px;
+      border: 2px solid #32cd32;
+    }
+
+    .led {
+      width: 10px;
+      height: 10px;
+      margin: 2px;
+      background-color: darkgreen;
+      display: inline-block;
+      border-radius: 50%;
+    }
+
+    .led.on { background-color: rgb(255, 0, 0); }
+
+    .status {
+      margin: 10px 0;
+      padding: 10px 10px;
+      background-color: #c12121;
+      border-radius: 5px;
+    }
+
+    .volume, .progress {
+      display: flex;
+      align-items: center;
+      width: 100%;
+      max-width: 400px;
+      margin: 0.5px 0;
+    }
+
+    .volume label, .progress-label {
+      margin-right: 75px;
+      min-width: 60px;
+    }
+
+    #volumePercentage, #porcentagem {
+      margin-left: 10px;
+      min-width: 40px;
+    }
+
+    .effects {
+      margin: 15px 0;
+    }
+  </style>
+</head>
+<body>
+  <h1>🎧 Projeto de Multimídia</h1>
+  <h1>Rádio R FOX</h1>
+
+  <div class="status" id="statusMsg">Selecione um arquivo de áudio</div>
+
+  <audio id="audioPlayer" loop></audio>
+
+  <input type="file" id="audioFile" accept="audio/*">
+
+  <div class="controls">
+    <button id="playBtn" onclick="handlePlay()">Play</button>
+    <button id="pauseBtn" onclick="pauseAudio()" disabled>Pause</button>
+    <button id="stopBtn" onclick="stopAudio()" disabled>Stop</button>
+    <button onclick="toggleLoop()">Loop: <span id="loopStatus">On</span></button>
+  </div>
+
+  <div class="effects">
+    <button onclick="toggleReverb()">Reverb</button>
+    <button onclick="toggleDistortion()">Distorção</button>
+    <button onclick="toggleLowpass()">Passa-baixa</button>
+    <button onclick="toggleHighpass()">Passa-alta</button>
+  </div>
+
+  <div class="volume">
+    <label>Volume:</label>
+    <input type="range" id="volume" min="0" max="1" step="0.01" value="0.0">
+    <div id="volumePercentage">0%</div>
+  </div>
+
+  <div class="progress">
+    <span class="progress-label">Progresso:</span>
+    <input type="range" id="progress" min="0" max="100" value="0">
+    <div id="porcentagem">0%</div>
+  </div>
+
+  <div id="leds">
+    <div class="led" id="led1"></div>
+    <div class="led" id="led2"></div>
+    <div class="led" id="led3"></div>
+    <div class="led" id="led4"></div>
+    <div class="led" id="led5"></div>
+  </div>
+
+  <canvas id="visualizer" width="400" height="50"></canvas>
+
+  <script>
+    const audio = document.getElementById('audioPlayer');
+    const audioFile = document.getElementById('audioFile');
+    const volumeSlider = document.getElementById('volume');
+    const volumePercentage = document.getElementById('volumePercentage');
+    const progressBar = document.getElementById('progress');
+    const porcentagem = document.getElementById('porcentagem');
+    const loopStatus = document.getElementById('loopStatus');
+    const leds = [...document.querySelectorAll('.led')];
+    const canvas = document.getElementById('visualizer');
+    const ctx = canvas.getContext('2d');
+    const statusMsg = document.getElementById('statusMsg');
+    const playBtn = document.getElementById('playBtn');
+    const pauseBtn = document.getElementById('pauseBtn');
+    const stopBtn = document.getElementById('stopBtn');
+
+    let audioCtx, analyser, source, dataArray;
+    let initialized = false, isPlaying = false;
+
+    let reverbNode, distortionNode, lowpassNode, highpassNode;
+    let effectsChain = [];
+
+    // Iniciar sem som
+    audio.volume = 0;
+
+    function updateVolumePercentage() {
+      volumePercentage.textContent = Math.round(audio.volume * 100) + "%";
+    }
+
+    volumeSlider.addEventListener('input', () => {
+      audio.volume = volumeSlider.value;
+      updateVolumePercentage();
+    });
+
+    function setupAudioContext() {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        analyser = audioCtx.createAnalyser();
+        source = audioCtx.createMediaElementSource(audio);
+        setupEffects();
+        connectEffects();
+        analyser.fftSize = 64;
+        dataArray = new Uint8Array(analyser.frequencyBinCount);
+        draw();
+      }
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      return true;
+    }
+
+    function setupEffects() {
+      reverbNode = audioCtx.createConvolver();
+      distortionNode = audioCtx.createWaveShaper();
+      distortionNode.curve = makeDistortionCurve(400);
+      distortionNode.oversample = '4x';
+      lowpassNode = audioCtx.createBiquadFilter();
+      lowpassNode.type = "lowpass";
+      lowpassNode.frequency.value = 1000;
+      highpassNode = audioCtx.createBiquadFilter();
+      highpassNode.type = "highpass";
+      highpassNode.frequency.value = 500;
+      effectsChain = [source];
+    }
+
+    function connectEffects() {
+      let chain = [...effectsChain, analyser];
+      analyser.disconnect();
+      chain.forEach(node => node.disconnect());
+      for (let i = 0; i < chain.length - 1; i++) {
+        chain[i].connect(chain[i + 1]);
+      }
+      analyser.connect(audioCtx.destination);
+    }
+
+    function toggleEffect(node) {
+      const index = effectsChain.indexOf(node);
+      if (index !== -1) {
+        effectsChain.splice(index, 1);
+      } else {
+        effectsChain.push(node);
+      }
+      connectEffects();
+    }
+
+    function toggleReverb() { toggleEffect(reverbNode); }
+    function toggleDistortion() { toggleEffect(distortionNode); }
+    function toggleLowpass() { toggleEffect(lowpassNode); }
+    function toggleHighpass() { toggleEffect(highpassNode); }
+
+    function makeDistortionCurve(amount) {
+      const n = 44100, curve = new Float32Array(n);
+      for (let i = 0; i < n; ++i) {
+        let x = i * 2 / n - 1;
+        curve[i] = (3 + amount) * x * 20 * Math.PI / 180 / (Math.PI + amount * Math.abs(x));
+      }
+      return curve;
+    }
+
+    function draw() {
+      requestAnimationFrame(draw);
+      if (!analyser) return;
+      analyser.getByteFrequencyData(dataArray);
+      ctx.fillStyle = 'black';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      const barWidth = (canvas.width / dataArray.length) * 2;
+      let x = 0;
+      for (let i = 0; i < dataArray.length; i++) {
+        const barHeight = dataArray[i];
+        ctx.fillStyle = 'lime';
+        ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+        x += barWidth + 1;
+      }
+      if (isPlaying) {
+        const active = Math.floor(Math.random() * 5);
+        leds.forEach((led, i) => led.classList.toggle('on', i === active));
+      } else {
+        leds.forEach(led => led.classList.remove('on'));
+      }
+    }
+
+    function handlePlay() {
+      if (!initialized) {
+        if (!setupAudioContext()) return;
+        initialized = true;
+      }
+
+      // Aplicar volume atual (inicia como 0)
+      audio.volume = volumeSlider.value;
+      updateVolumePercentage();
+
+      audio.play().then(() => {
+        isPlaying = true;
+        statusMsg.textContent = "Reproduzindo áudio...";
+        updateButtons(true);
+      }).catch(error => {
+        statusMsg.textContent = "Erro: " + error.message;
+      });
+    }
+
+    function pauseAudio() {
+      audio.pause();
+      isPlaying = false;
+      statusMsg.textContent = "Áudio pausado";
+      updateButtons(false);
+    }
+
+    function stopAudio() {
+      audio.pause();
+      audio.currentTime = 0;
+      isPlaying = false;
+      statusMsg.textContent = "Reprodução parada";
+      updateButtons(false);
+    }
+
+    function toggleLoop() {
+      audio.loop = !audio.loop;
+      loopStatus.textContent = audio.loop ? "On" : "Off";
+    }
+
+    function updateButtons(playing) {
+      playBtn.disabled = playing;
+      pauseBtn.disabled = !playing;
+      stopBtn.disabled = !playing;
+    }
+
+    audio.addEventListener('timeupdate', () => {
+      const percent = (audio.currentTime / audio.duration) * 100;
+      progressBar.value = percent || 0;
+      porcentagem.textContent = Math.round(percent || 0) + "%";
+    });
+
+    progressBar.addEventListener('input', () => {
+      if (audio.duration) {
+        audio.currentTime = (progressBar.value / 100) * audio.duration;
+      }
+    });
+
+    audioFile.addEventListener('change', (event) => {
+      const file = event.target.files[0];
+      if (file) {
+        const objectURL = URL.createObjectURL(file);
+        audio.src = objectURL;
+        audio.load();
+
+        // Volume resetado para 0 no novo áudio
+        audio.volume = volumeSlider.value;
+        updateVolumePercentage();
+
+        statusMsg.textContent = `Arquivo "${file.name}" carregado. Clique em Play para ouvir.`;
+      }
+    });
+
+    audio.addEventListener('ended', () => {
+      if (!audio.loop) {
+        isPlaying = false;
+        updateButtons(false);
+        statusMsg.textContent = "Reprodução concluída";
+      }
+    });
+
+    audio.addEventListener('error', (e) => {
+      statusMsg.textContent = "Erro no áudio.";
+      console.error("Erro de áudio:", e);
+      isPlaying = false;
+      updateButtons(false);
+    });
+  </script>
+</body>
+ Copyright: Lenilson Alves
+</html>
+
